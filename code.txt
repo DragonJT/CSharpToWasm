@@ -1,0 +1,24 @@
+
+static class Program
+{
+    [import]
+    static void Print(int i)
+    {
+        console.log("int "+i);
+    }
+
+    [import]
+    static void Print(float f)
+    {
+        console.log("float "+f);
+    }
+
+    [export]
+    static void Main()
+    {
+        var x = 4 + 3;
+        var y = 2 * 3.3f;
+        Print(x);
+        Print(y);
+    }
+}
