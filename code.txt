@@ -16,9 +16,10 @@ static class Program
     [export]
     static void Main()
     {
-        var x = 4 + 3;
-        var y = 2 * 3.3f;
-        Print(x);
-        Print(y);
+        int[] z = [32, 45, 56, 73];
+        Print(z[0]);
+        Print(z[1]);
+        Print(z[2]);
+        Print(z[3]);
     }
 }

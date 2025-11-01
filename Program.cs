@@ -38,6 +38,12 @@ record VoidType : IType
     public override string ToString() => "void";
 }
 
+record Array(IType Element) : IType
+{
+    public WasmEmitter.Valtype Valtype => WasmEmitter.Valtype.I32;
+    public override string ToString() => Element.ToString() + "[]";
+}
+
 record Signature(string Name, IType[] Types, WasmEmitter.Code[] Codes, IType ReturnType);
 
 record Cast(bool Implicit, IType From, IType To, WasmEmitter.Code[] Codes);
@@ -73,27 +79,32 @@ static class Program
         return true;
     }
 
+    static bool GetImplicitCast(IType from, IType to, out WasmEmitter.Code[]? codes)
+    {
+        codes = null;
+        if(from == to)
+        {
+            return true;
+        }
+        var cast = casts.FirstOrDefault(c => c.Implicit && c.From == from && c.To == to);
+        if (cast == null) return false;
+        codes = cast.Codes;
+        return true;
+    }
+
     static List<WasmEmitter.Code[]?>? CastMatch(IType[] args, Signature signature)
     {
         if (signature.Types.Length != args.Length) return null;
         List<WasmEmitter.Code[]?> castCodes = [];
         for (var i = 0; i < signature.Types.Length; i++)
         {
-            if (signature.Types[i] != args[i])
+            if(GetImplicitCast(args[i], signature.Types[i], out var codes))
             {
-                var cast = casts.FirstOrDefault(c => c.Implicit && c.From == args[i] && c.To == signature.Types[i]);
-                if (cast != null)
-                {
-                    castCodes.Add(cast.Codes);
-                }
-                else
-                {
-                    return null;
-                }
+                castCodes.Add(codes);
             }
             else
             {
-                castCodes.Add(null);
+                return null;
             }
         }
         return castCodes;
@@ -142,6 +153,7 @@ static class Program
     {
         return typeSyntax.ToString() switch
         {
+            "int[]" => new Array(intType),
             "int" => intType,
             "float" => floatType,
             "void" => voidType,
@@ -149,7 +161,7 @@ static class Program
         };
     }
 
-    static ExpressionData EmitExpression(FunctionData fd, ExpressionSyntax expressionSyntax)
+    static ExpressionData EmitExpression(FunctionData fd, ExpressionSyntax expressionSyntax, IType? type = null)
     {
         if (expressionSyntax is InvocationExpressionSyntax invocationExpressionSyntax)
         {
@@ -171,7 +183,7 @@ static class Program
             if (local == null)
             {
                 var sigs = signatures.Where(s => s.Name == identifierNameSyntax.Identifier.ValueText).ToArray();
-                return new (new Delegate(sigs), []);
+                return new(new Delegate(sigs), []);
             }
             else
             {
@@ -189,15 +201,75 @@ static class Program
         {
             if (literalExpressionSyntax.Token.Value is int intValue)
             {
-                return new (intType, [new(WasmEmitter.Opcode.i32_const, intValue.ToString())]);
+                return new(intType, [new(WasmEmitter.Opcode.i32_const, intValue.ToString())]);
             }
             else if (literalExpressionSyntax.Token.Value is float floatValue)
             {
-                return new (floatType, [new(WasmEmitter.Opcode.f32_const, floatValue.ToString())]);
+                return new(floatType, [new(WasmEmitter.Opcode.f32_const, floatValue.ToString())]);
             }
             else
             {
                 throw new Exception("Unexpected type: " + literalExpressionSyntax.Token.Value?.GetType().Name);
+            }
+        }
+        else if(expressionSyntax is ElementAccessExpressionSyntax elementAccessExpressionSyntax)
+        {
+            //This is just a hack...
+            var args = elementAccessExpressionSyntax.ArgumentList.Arguments;
+            var codes = EmitExpression(fd, args[0].Expression).Codes;
+            return new(intType, [
+                ..codes,
+                new(WasmEmitter.Opcode.i32_const, "1"),
+                new(WasmEmitter.Opcode.i32_add),
+                new(WasmEmitter.Opcode.i32_const, "4"),
+                new(WasmEmitter.Opcode.i32_mul),
+                new(WasmEmitter.Opcode.i32_load),
+            ]);
+        }
+        else if (expressionSyntax is CollectionExpressionSyntax collectionExpressionSyntax)
+        {
+            if (type is Array array)
+            {
+                List<WasmEmitter.Code> codes = [];
+                foreach (var element in collectionExpressionSyntax.Elements)
+                {
+                    switch (element)
+                    {
+                        case ExpressionElementSyntax e:
+                            var elementData = EmitExpression(fd, e.Expression);
+                            codes.Add(new(WasmEmitter.Opcode.i32_const, "0"));
+                            codes.Add(new(WasmEmitter.Opcode.i32_const, "0"));
+                            codes.Add(new(WasmEmitter.Opcode.i32_load));
+                            codes.Add(new(WasmEmitter.Opcode.i32_const, "4"));
+                            codes.Add(new(WasmEmitter.Opcode.i32_add));
+                            codes.Add(new(WasmEmitter.Opcode.i32_store));
+                            codes.Add(new(WasmEmitter.Opcode.i32_const, "0"));
+                            codes.Add(new(WasmEmitter.Opcode.i32_load));
+                            codes.AddRange(elementData.Codes);
+                            if (GetImplicitCast(elementData.Type, array.Element, out var castCodes))
+                            {
+                                if (castCodes != null)
+                                {
+                                    codes.AddRange(castCodes);
+                                }
+                            }
+                            else
+                            {
+                                throw new Exception($"type mismatch {elementData.Type} {array.Element}");
+                            }
+                            codes.Add(new WasmEmitter.Code(WasmEmitter.Opcode.i32_store));
+                            break;
+
+                        case SpreadElementSyntax s:
+                            throw new Exception("Spread element not supported");
+                    }
+                }
+                codes.Add(new(WasmEmitter.Opcode.i32_const, "0"));
+                return new(type, [.. codes]);
+            }
+            else
+            {
+                throw new Exception("type should be array");
             }
         }
         else
@@ -211,9 +283,9 @@ static class Program
         var name = variableDeclaratorSyntax.Identifier.ValueText;
         if (variableDeclaratorSyntax.Initializer != null)
         {
-            var exprData = EmitExpression(fd, variableDeclaratorSyntax.Initializer.Value);
             if (typeSyntax.ToString() == "var")
             {
+                var exprData = EmitExpression(fd, variableDeclaratorSyntax.Initializer.Value);
                 fd.codes.AddRange(exprData.Codes);
                 fd.codes.Add(new(WasmEmitter.Opcode.set_local, name));
                 fd.locals.Add(new(exprData.Type, name));
@@ -221,6 +293,7 @@ static class Program
             else
             {
                 var type = typeSyntax.ToCSharpType();
+                var exprData = EmitExpression(fd, variableDeclaratorSyntax.Initializer.Value, type);
                 if (type == exprData.Type)
                 {
                     fd.codes.AddRange(exprData.Codes);
